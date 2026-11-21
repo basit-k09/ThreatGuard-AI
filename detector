@@ -1,0 +1,111 @@
+"""Transparent, educational phishing-risk heuristics for ThreatGuard AI.
+
+This is a client-side style scoring demonstration, not a replacement for a
+browser's safe-browsing protections or professional threat intelligence.
+"""
+import ipaddress
+import re
+from urllib.parse import urlparse
+
+SUSPICIOUS_WORDS = {
+    "login", "verify", "verification", "password", "account", "secure",
+    "update", "unlock", "suspended", "urgent", "confirm", "banking",
+    "wallet", "crypto", "gift card", "payroll",
+}
+SHORTENERS = {"bit.ly", "tinyurl.com", "t.co", "goo.gl", "rb.gy", "is.gd", "ow.ly"}
+URGENCY_WORDS = {"urgent", "immediately", "act now", "limited time", "suspended", "final warning"}
+BRANDS = {"paypal", "microsoft", "google", "apple", "amazon", "netflix", "bank"}
+
+
+def _risk_level(score):
+    if score >= 70:
+        return "High"
+    if score >= 35:
+        return "Medium"
+    return "Low"
+
+
+def _response(score, reasons, kind):
+    score = min(score, 100)
+    level = _risk_level(score)
+    recommendation = {
+        "High": "Avoid clicking links or entering credentials. Verify through the organization’s official website or contact channel.",
+        "Medium": "Treat this with caution. Verify the sender and inspect the destination before interacting.",
+        "Low": "No major warning signs were found, but remain cautious with unexpected links and requests.",
+    }[level]
+    return {
+        "score": score,
+        "level": level,
+        "reasons": reasons or ["No high-confidence warning signs were found by these basic checks."],
+        "recommendation": recommendation,
+        "kind": kind,
+    }
+
+
+def analyze_url(raw_url):
+    url = raw_url.strip()
+    if not re.match(r"^[a-zA-Z][a-zA-Z0-9+.-]*://", url):
+        url = "http://" + url
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host or " " in host:
+        raise ValueError("Please enter a valid URL, for example: https://example.com")
+    path_and_query = f"{parsed.path}?{parsed.query}".lower()
+    score, reasons = 0, []
+
+    if parsed.scheme != "https":
+        score += 20
+        reasons.append({"severity": "high", "text": "The link does not use HTTPS, so its connection may not be protected."})
+    try:
+        ipaddress.ip_address(host)
+        score += 30
+        reasons.append({"severity": "high", "text": "The link uses a raw IP address instead of a recognizable domain."})
+    except ValueError:
+        pass
+    if host in SHORTENERS or any(host.endswith("." + item) for item in SHORTENERS):
+        score += 25
+        reasons.append({"severity": "medium", "text": "This is a URL-shortening service that hides the final destination."})
+    if "@" in parsed.netloc:
+        score += 25
+        reasons.append({"severity": "high", "text": "The URL contains an @ symbol, which can disguise the actual destination."})
+    if len(url) > 90:
+        score += 10
+        reasons.append({"severity": "medium", "text": "The URL is unusually long, a technique often used to obscure suspicious details."})
+    if host.count(".") >= 3:
+        score += 10
+        reasons.append({"severity": "medium", "text": "The domain has many subdomains, which can be used to imitate a trusted name."})
+    found = sorted(word for word in SUSPICIOUS_WORDS if word in path_and_query or word in host)
+    if found:
+        score += min(25, 8 * len(found))
+        reasons.append({"severity": "medium", "text": f"Suspicious credential or urgency terms found: {', '.join(found[:4])}."})
+    if re.search(r"[a-z0-9]-[a-z0-9]", host) and any(brand in host for brand in BRANDS):
+        score += 15
+        reasons.append({"severity": "medium", "text": "The domain combines a known brand name with extra wording or separators."})
+    return _response(score, reasons, "URL")
+
+
+def analyze_text(text):
+    normalized = text.lower()
+    score, reasons = 0, []
+    found_urgency = [word for word in URGENCY_WORDS if word in normalized]
+    if found_urgency:
+        score += 20
+        reasons.append({"severity": "medium", "text": "The message uses urgency or pressure language."})
+    credential_pattern = r"(password|passcode|verification code|one-time code|otp|social security)"
+    if re.search(credential_pattern, normalized):
+        score += 25
+        reasons.append({"severity": "high", "text": "The message asks for sensitive account or identity information."})
+    if re.search(r"(gift card|bitcoin|crypto|wire transfer|payment)" , normalized):
+        score += 20
+        reasons.append({"severity": "high", "text": "The message references a payment method commonly used in scams."})
+    links = re.findall(r"(?:https?://|www\.)[^\s<>]+", text, flags=re.I)
+    if links:
+        score += 10
+        reasons.append({"severity": "medium", "text": "The message contains a link; inspect its destination before opening it."})
+    if re.search(r"(dear customer|dear user|valued customer)", normalized):
+        score += 8
+        reasons.append({"severity": "low", "text": "The greeting is generic rather than personally addressed."})
+    if text.count("!") >= 3 or re.search(r"\b[A-Z]{5,}\b", text):
+        score += 7
+        reasons.append({"severity": "low", "text": "Excessive punctuation or capitalization may be designed to create pressure."})
+    return _response(score, reasons, "Message")
